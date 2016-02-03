@@ -15,27 +15,29 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-Dieses Programm ist Freie Software: Sie können es unter den Bedingungen
+Dieses Programm ist Freie Software: Sie kï¿½nnen es unter den Bedingungen
 der GNU General Public License, wie von der Free Software Foundation,
 Version 3 der Lizenz oder (nach Ihrer Wahl) jeder neueren
-veröffentlichten Version, weiterverbreiten und/oder modifizieren.
+verï¿½ffentlichten Version, weiterverbreiten und/oder modifizieren.
 
-Dieses Programm wird in der Hoffnung, dass es nützlich sein wird, aber
-OHNE JEDE GEWÄHRLEISTUNG, bereitgestellt; sogar ohne die implizite
-Gewährleistung der MARKTFÄHIGKEIT oder EIGNUNG FÜR EINEN BESTIMMTEN ZWECK.
-Siehe die GNU General Public License für weitere Details.
+Dieses Programm wird in der Hoffnung, dass es nï¿½tzlich sein wird, aber
+OHNE JEDE GEWï¿½HRLEISTUNG, bereitgestellt; sogar ohne die implizite
+Gewï¿½hrleistung der MARKTFï¿½HIGKEIT oder EIGNUNG Fï¿½R EINEN BESTIMMTEN ZWECK.
+Siehe die GNU General Public License fï¿½r weitere Details.
 
 Sie sollten eine Kopie der GNU General Public License zusammen mit diesem
 Programm erhalten haben. Wenn nicht, siehe <http://www.gnu.org/licenses/>. 
 */
 
 //Library includes
+#include <DS1307RTC.h>
 #include <FastLED.h>
 #include <Wire.h>
 #include <Time.h>
-#include <DCF77.h>
-#include <IRremote.h>
-#include "default_layout.h" //#include "alt_layout1.h"
+#include <SoftwareSerial.h>
+//#include <DCF77.h>
+//#include <IRremote.h>
+#include "alt_layout3.h" //#include "alt_layout1.h"
 
 // IR defines
 #define ONOFF 0xFF02FD
@@ -58,39 +60,60 @@ Programm erhalten haben. Wenn nicht, siehe <http://www.gnu.org/licenses/>.
 #define NUM_LEDS 114
 
 //PIN defines
-#define STRIP_DATA_PIN 6
-#define IR_RECV_PIN 11
+#define STRIP_DATA_PIN 12
+//#define IR_RECV_PIN 11
 #define ARDUINO_LED 13 //Default Arduino LED
-#define DCF_PIN 2	         // Connection pin to DCF 77 device
+//#define DCF_PIN 2	         // Connection pin to DCF 77 device
 #define DCF_INTERRUPT 0		 // Interrupt number associated with pin
 #define LDR_PIN 0
 
+//WIFI defines
+#define WIFI_SSID         "KA"
+#define WIFI_PASS         "2905Lena2410"
+#define WIFI_RX_PIN       10
+#define WIFI_TX_PIN       11
+
+// For NTP sync
+unsigned long time = 0;
+const int NTP_PACKET_SIZE= 48; // NTP time stamp is in the first 48 bytes of the message
+byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
+
+#define BUFFER_SIZE 128
+char buffer[BUFFER_SIZE];
+
 //dcf variables
+/*
 time_t time;
 DCF77 DCF = DCF77(DCF_PIN,DCF_INTERRUPT);
 bool timeInSync = false;
+*/
+
+//Wifi variables
+SoftwareSerial wifiSerial(WIFI_RX_PIN, WIFI_TX_PIN); // RX, TX
 
 uint8_t strip[NUM_LEDS];
 uint8_t stackptr = 0;
+tmElements_t tm;
 
 CRGB leds[NUM_LEDS];
-
+/*
 IRrecv irrecv = IRrecv(IR_RECV_PIN);
 decode_results irDecodeResults;
-
+*/
 uint8_t selectedLanguageMode = 0;
 const uint8_t RHEIN_RUHR_MODE = 0; //Define?
 const uint8_t WESSI_MODE = 1;
 
 boolean autoBrightnessEnabled = true;
+boolean listening = false;
 
 int displayMode = DIY1;
 
-CRGB defaultColor = CRGB::White;
+CRGB defaultColor = CRGB::Red;
 uint8_t colorIndex = 0;
 
-int testHours = 0;
-int testMinutes = 0;
+int currentHours = 0;
+int currentMinutes = 0;
 
 //multitasking helper
 
@@ -108,8 +131,8 @@ long waitUntilLDR = 0;
 //forward declaration
 void fastTest();
 void clockLogic();
-void doIRLogic();
-void doLDRLogic();
+//void doIRLogic();
+//void doLDRLogic();
 void makeParty();
 void off();
 void showHeart();
@@ -120,9 +143,9 @@ void displayStripRandomColor();
 void displayStrip();
 void displayStrip(CRGB colorCode);
 void timeToStrip(uint8_t hours,uint8_t minutes);
-void doDCFLogic();
+//void doDCFLogic();
 
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
 	#define DEBUG_PRINT(str)  Serial.println (str)
@@ -132,9 +155,16 @@ void doDCFLogic();
 
 void setup() {
 	
+  delay(2000);
+  
 	#ifdef DEBUG
 		Serial.begin(9600);
+    while (!Serial) {
+        ; // wait for serial port to connect. Needed for Leonardo only
+    }   
 	#endif
+
+  setupWifi();  
 	
 	pinMode(ARDUINO_LED, OUTPUT);
 	
@@ -144,14 +174,15 @@ void setup() {
 	}
 	FastLED.addLeds<WS2812B, STRIP_DATA_PIN, GRB>(leds, NUM_LEDS);
 	resetAndBlack();
-	displayStrip();
+	//displayStrip();
 	
 	//setup dcf
-	DCF.Start();
+	//DCF.Start();
 	setSyncInterval(3600); //every hour
-	setSyncProvider(getDCFTime);
-	DEBUG_PRINT("Waiting for DCF77 time ... ");
+	setSyncProvider(getNtpTime);
+	DEBUG_PRINT("Waiting for NTP time ... ");
 	DEBUG_PRINT("It will take at least 2 minutes until a first update can be processed.");
+
 	while(timeStatus()== timeNotSet) {
 		// wait until the time is set by the sync provider
 		DEBUG_PRINT(".");
@@ -159,11 +190,22 @@ void setup() {
 	}
 	
 	//setup ir
-	irrecv.enableIRIn();
+	//irrecv.enableIRIn();
+
+  startHttpServer();
+  //startListening();  
+}
+
+void setupWifi() {
+  // set the data rate for the SoftwareSerial port
+  wifiSerial.begin(9600);
+  delay (1000);
+  connectWiFi();  // Start the WiFi module
 }
 
 void loop() {
-	doIRLogic();
+	//doIRLogic();
+  doHttpLogic();
 	doLDRLogic();
 	switch(displayMode) {
 		case ONOFF:
@@ -187,6 +229,42 @@ void loop() {
 	}
 }
 
+int start_save=0;
+int ndx=0;
+
+time_t getNtpTime()
+{
+  stopListening();
+  DEBUG_PRINT("getNtpTime");
+  unsigned long epoch = 0;
+  connectNTP();
+  setPacket();
+  time = millis();
+  while ((time + 10000) >= millis()){
+    if (wifiSerial.available()) {
+        
+      unsigned char c=wifiSerial.read();
+  
+      if( start_save && ndx < 48 ) 
+        packetBuffer[ndx++]=c;
+      else if( c == ':' )  // get the next 48 bytes
+        start_save=1;
+  
+      if(  start_save && ndx == 48 ) {  // convert
+        epoch = dump_ntp_packet();
+        ndx=start_save=0;
+        startListening();
+        return epoch;
+      }
+      // Serial.write(c);
+    }
+  }
+  DEBUG_PRINT("NTP failed - no wifi"); 
+  startListening();
+  return epoch;
+}
+
+/*
 unsigned long getDCFTime() {
 	time_t DCFtime = DCF.getTime();
 	// Indicator that a time check is done
@@ -195,19 +273,19 @@ unsigned long getDCFTime() {
 	}
 	return DCFtime;
 }
-
+*/
 void doLDRLogic() {
 	if(millis() >= waitUntilLDR && autoBrightnessEnabled) {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
 		int ldrVal = map(analogRead(LDR_PIN), 0, 1023, 0, 150);
-		FastLED.setBrightness(255-ldrVal);
+		FastLED.setBrightness(105+ldrVal);
 		FastLED.show();
 		DEBUG_PRINT(ldrVal);
 		waitUntilLDR += oneSecondDelay;
 	}
 }
-
+/*
 void doIRLogic() {
 	uint8_t brightness = 0;
 	if (irrecv.decode(&irDecodeResults)) {
@@ -250,8 +328,8 @@ void doIRLogic() {
 				displayMode = DIY1;
 				autoBrightnessEnabled = true;
 				//to force display update
-				testMinutes = -1;
-				testHours = -1;
+				currentMinutes = -1;
+				currentHours = -1;
 				break;
 			case DIY2:
 				displayMode = DIY2;
@@ -286,7 +364,7 @@ void doIRLogic() {
 		irrecv.resume();
 	}
 }
-
+*/
 ///////////////////////
 //DISPLAY MODES
 ///////////////////////
@@ -294,11 +372,11 @@ void clockLogic() {
 	if(millis() >= waitUntilRtc) {
 		DEBUG_PRINT("doing clock logic");
 		waitUntilRtc = millis();
-		if(testMinutes != minute() || testHours != hour()) {
-			testMinutes = minute();
-			testHours = hour();
+		if(currentMinutes != minute() || currentHours != hour()) {
+			currentMinutes = minute();
+			currentHours = hour();
 			resetAndBlack();
-			timeToStrip(testHours, testMinutes);
+			timeToStrip(currentHours, currentMinutes);
 			displayStrip(defaultColor);
 		}
 		waitUntilRtc += oneSecondDelay;
@@ -355,19 +433,19 @@ void fastTest() {
 		autoBrightnessEnabled = false;
 		DEBUG_PRINT("showing heart");
 		waitUntilFastTest = millis();
-		if(testMinutes >= 60) {
-			testMinutes = 0;
-			testHours++;
+		if(currentMinutes >= 60) {
+			currentMinutes = 0;
+			currentHours++;
 		}
-		if(testHours >= 24) {
-			testHours = 0;
+		if(currentHours >= 24) {
+			currentHours = 0;
 		}
 		
 		//Array leeren
 		resetAndBlack();
-		timeToStrip(testHours, testMinutes);
+		timeToStrip(currentHours, currentMinutes);
 		displayStripRandomColor();
-		testMinutes++;
+		currentMinutes++;
 		waitUntilFastTest += oneSecondDelay;
 	}
 }
@@ -770,3 +848,231 @@ void pushUHR() {
 	pushToStrip(L100);
 }
 ///////////////////////
+
+// WIFI and NTP functions down here
+void connectWiFi()
+{
+
+  //Reset the module.
+  espCommand("AT+RST", 2000);
+  delay(20);
+
+  //Set the wireless mode
+  espCommand("AT+CWMODE=1", 500);
+  delay(20);
+
+  //disconnect  - it shouldn't be but just to make sure
+  espCommand("AT+CWQAP", 1000);
+
+  // connect to your wireless router 
+  String cmd="AT+CWJAP=\"";
+  cmd+=WIFI_SSID;
+  cmd+="\",\"";
+  cmd+=WIFI_PASS;
+  cmd+="\"";
+  espCommand(cmd, 15000);
+
+  //print the ip addr
+  espCommand("AT+CIFSR", 5000);
+
+  //set the single connection mode
+  espCommand("AT+CIPMUX=1", 1000);
+}
+
+String espCommand(String cmd, int timeout) {
+  DEBUG_PRINT(cmd);
+  wifiSerial.println(cmd);
+  String response = "";
+  time = millis();
+  while ((time + timeout) >= millis()){
+    if (wifiSerial.available() > 0) {
+      char c = wifiSerial.read();
+      response += c;
+    }
+  }
+  DEBUG_PRINT(response);
+  return response;
+}
+
+void connectNTP() {
+  //Connect to the NTP server
+  espCommand("AT+CIPSTART=0,\"UDP\",\"129.6.15.28\",123", 5000);
+}
+
+void cipsend() {
+  espCommand("AT+CIPSEND=0,48", 5000);
+}
+
+void setPacket(){
+
+  cipsend();
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+  wifiSerial.write(packetBuffer,NTP_PACKET_SIZE);
+}
+
+unsigned long dump_ntp_packet() {
+  unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+  unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);  
+  // combine the four bytes (two words) into a long integer
+  // this is NTP time (seconds since Jan 1 1900):
+  unsigned long secsSince1900 = highWord << 16 | lowWord;  
+  Serial.print("Seconds since Jan 1 1900 = " );
+  Serial.println(secsSince1900);               
+
+  // now convert NTP time into everyday time:
+  Serial.print("Unix time = ");
+  // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+  const unsigned long seventyYears = 2208988800UL;     
+  // subtract seventy years:
+  unsigned long epoch = secsSince1900 - seventyYears;  
+  // print Unix time:
+  Serial.println(epoch);   
+                              
+
+
+  // print the hour, minute and second:
+  Serial.print("The UTC time is ");       // UTC is the time at Greenwich Meridian (GMT)
+  int h=(epoch  % 86400L) / 3600;
+  Serial.print(h); // print the hour (86400 equals secs per day)
+  Serial.print(':');  
+  if ( ((epoch % 3600) / 60) < 10 ) {
+    // In the first 10 minutes of each hour, we'll want a leading '0'
+    Serial.print('0');
+  }
+  Serial.print((epoch  % 3600) / 60); // print the minute (3600 equals secs per minute)
+  Serial.print(':'); 
+  if ( (epoch % 60) < 10 ) {
+    // In the first 10 seconds of each minute, we'll want a leading '0'
+    Serial.print('0');
+  }
+  Serial.println(epoch %60); // print the second
+
+  return epoch;
+}
+
+void startHttpServer() {
+  espCommand("AT+CIPSERVER=1,80", 1000);
+}
+
+void clearBuffer(void) {
+  for (int i =0;i<BUFFER_SIZE;i++ ) {
+    buffer[i]=0;
+  }
+}
+
+void clearSerialBuffer(void) {
+  while ( wifiSerial.available() > 0 ) {
+    wifiSerial.read();
+  }
+}
+
+void homepage(int ch_id) {
+  String Header;
+
+  Header =  "HTTP/1.1 200 OK\r\n";
+  Header += "Content-Type: text/html\r\n";
+  Header += "Connection: close\r\n";  
+  //Header += "Refresh: 5\r\n";
+  
+  String Content;
+  Content = "D";
+  
+  Header += "Content-Length: ";
+  Header += (int)(Content.length());
+  Header += "\r\n\r\n";
+  
+  
+  wifiSerial.print("AT+CIPSEND=");
+  wifiSerial.print(ch_id);
+  wifiSerial.print(",");
+  wifiSerial.println(Header.length()+Content.length());
+  delay(10);
+  
+  // for debug buffer serial error
+  //while (espSerial.available() >0 )  {
+  //  char c = espSerial.read();
+  //  dbgTerminal.write(c);
+  //  if (c == '>') {
+  //      espSerial.print(Header);
+  //      espSerial.print(Content);
+  //  }
+  //}
+  
+  if (wifiSerial.find(">")) {
+      wifiSerial.print(Header);
+      wifiSerial.print(Content);
+      delay(10);
+   }
+ 
+//  Serial1.print("AT+CIPCLOSE=");
+//  Serial1.println(ch_id);
+
+
+}
+
+void doHttpLogic() {
+  /*
+  int ch_id, packet_len;
+  char *pb;
+  */
+
+  DEBUG_PRINT("doHttpLogic");
+  DEBUG_PRINT("Listening:");
+  DEBUG_PRINT(listening);
+  
+  
+  if(false) {  
+  
+    if(wifiSerial.available()) {
+      /*
+      wifiSerial.readBytesUntil('\n', buffer, BUFFER_SIZE);
+      
+      if(strncmp(buffer, "+IPD,", 5)==0) {
+        // request: +IPD,ch,len:data
+        sscanf(buffer+5, "%d,%d", &ch_id, &packet_len);
+  
+        if (packet_len > 0) {
+          // read serial until packet_len character received
+          // start from :
+          pb = buffer+5;
+          while(*pb!=':') pb++;
+          pb++;
+          if (strncmp(pb, "GET / ", 6) == 0) {
+            DEBUG_PRINT(buffer);
+            delay(100);
+            clearSerialBuffer();
+    
+            homepage(ch_id);
+          }
+        }
+        
+      }
+      */
+    }
+    
+    clearBuffer();
+  }
+
+}
+
+
+void startListening() {
+  listening = true;
+}
+
+void stopListening() {
+  listening = false;
+}
+
